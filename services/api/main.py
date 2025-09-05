@@ -16,7 +16,7 @@ import numpy as np
 import soundfile as sf
 import time
 
-STT_ENDPOINT = os.getenv("STT_ENDPOINT", "http://host.docker.internal:8081")
+STT_ENDPOINT = os.getenv("STT_ENDPOINT", "http://127.0.0.1:8081")
 GLOSSARY_PATH = os.getenv("GLOSSARY_PATH", "/app/config/glossary.yaml")
 
 # Load glossary once (best-effort)
@@ -120,11 +120,15 @@ async def webrtc_offer(request: Request):
                 try:
                     frame = await track.recv()
                     if frame is None:
+                        await asyncio.sleep(0.01)  # 10ms 대기로 CPU 부하 방지
                         continue
                     rframe = resampler.resample(frame)
-                    # to_ndarray: shape (channels, samples) int16
-                    pcm = rframe.to_ndarray().tobytes()
-                    buffer.extend(pcm)
+                    # resampler가 list를 반환할 수 있으므로 처리
+                    resampled_frames = rframe if isinstance(rframe, list) else [rframe]
+                    for rf in resampled_frames:
+                        # to_ndarray: shape (channels, samples) int16
+                        pcm = rf.to_ndarray().tobytes()
+                        buffer.extend(pcm)
                     frame_count += 1
                     now = time.time()
                     if now - last_info >= 1.0:
@@ -166,16 +170,22 @@ async def webrtc_offer(request: Request):
                                 text = text.replace(k, v)
                             seg["text"] = text
 
-                        await broadcast_transcript(session_id, {"type": "final", **payload})
+                        # 발화자 정보를 포함하여 브로드캐스트 - payload 이후에 speaker 설정
+                        message_with_speaker = {"type": "final", **payload, "speaker": channel_id}
+                        print(f"[debug] Broadcasting with speaker: {channel_id}, message keys: {list(message_with_speaker.keys())}")
+                        await broadcast_transcript(session_id, message_with_speaker)
                         print(f"[stt] {stream_id} segments={len(payload.get('segments', []))} commit={payload.get('commit_point')}")
                         # 타임라인 이동
                         if payload.get("segments"):
                             start_ts = payload.get("commit_point", start_ts + window_sec)
                         else:
                             start_ts += window_sec
-                except Exception:
-                    # 에러는 무시하고 계속
-                    pass
+                except Exception as e:
+                    print(f"[webrtc] Audio processing error: {e}")
+                    await asyncio.sleep(0.1)  # 에러 시 잠시 대기
+                    # 연결이 끊어진 경우 루프 종료
+                    if "Connection" in str(e) or "closed" in str(e).lower():
+                        break
 
         asyncio.create_task(consume_audio())
         # 트랙 수신 시작 알림

@@ -40,17 +40,31 @@ def health():
 
 
 async def broadcast_transcript(session_id: str, message: dict):
+    print(f"[debug-broadcast-1] Broadcasting to session: {session_id}")
+    print(f"[debug-broadcast-2] Message to broadcast: {message}")
+    print(f"[debug-broadcast-3] Message speaker field: {message.get('speaker', 'NOT_FOUND')}")
+    
     targets = websockets_by_session.get(session_id, set())
+    print(f"[debug-broadcast-4] Found {len(targets)} WebSocket targets")
+    
     if not targets:
+        print(f"[debug-broadcast-5] No targets found, skipping broadcast")
         return
+    
     dead = []
-    for ws in targets:
+    for i, ws in enumerate(targets):
         try:
+            print(f"[debug-broadcast-6] Sending to WebSocket {i+1}")
             await ws.send_json(message)
-        except Exception:
+            print(f"[debug-broadcast-7] Successfully sent to WebSocket {i+1}")
+        except Exception as e:
+            print(f"[debug-broadcast-8] Failed to send to WebSocket {i+1}: {e}")
             dead.append(ws)
+    
     for ws in dead:
         targets.discard(ws)
+    
+    print(f"[debug-broadcast-9] Broadcast completed, removed {len(dead)} dead connections")
 
 
 @app.websocket("/ws/transcript")
@@ -118,12 +132,25 @@ async def webrtc_offer(request: Request):
                     data_i16 = np.frombuffer(chunk, dtype=np.int16)
                     sf.write(bio, data=data_i16, samplerate=16000, format="WAV", subtype="PCM_16")
                     bio.seek(0)
+                    print(f"[debug-1] Starting STT request for channel: {channel_id}")
                     async with httpx.AsyncClient(timeout=60) as client:
                         files = {"audio": (f"{channel_id}.wav", bio.read(), "audio/wav")}
                         data = {"stream_id": stream_id, "start_ts": str(start_ts), "lang": "auto", "initial_prompt": "", "word_timestamps": "false", "vad": "true"}
+                        print(f"[debug-2] STT request data: {data}")
                         r = await client.post(f"{STT_ENDPOINT}/v1/transcribe-window", data=data, files=files)
                         payload = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"type":"error","message":"stt invalid"}
-                    await broadcast_transcript(session_id, {"type":"final", **payload})
+                        print(f"[debug-3] STT response payload: {payload}")
+                    
+                    # 발화자 정보를 포함하여 브로드캐스트 - payload 이후에 speaker 설정
+                    print(f"[debug-4] Adding speaker field to payload")
+                    message_with_speaker = {"type":"final", **payload, "speaker": channel_id}
+                    print(f"[debug-5] Final message with speaker: {message_with_speaker}")
+                    print(f"[debug-6] Message keys: {list(message_with_speaker.keys())}")
+                    print(f"[debug-7] Speaker field value: {message_with_speaker.get('speaker', 'NOT_FOUND')}")
+                    
+                    print(f"[debug-8] Broadcasting to session: {session_id}")
+                    await broadcast_transcript(session_id, message_with_speaker)
+                    print(f"[debug-9] Broadcast completed")
                     print(f"[stt-host] {stream_id} segs={len(payload.get('segments',[]))} commit={payload.get('commit_point')}")
                     if payload.get("segments"):
                         start_ts = payload.get("commit_point", start_ts + window_sec)

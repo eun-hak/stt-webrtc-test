@@ -60,6 +60,7 @@
       let pc;
       let ws;
       let sessionId;
+      let channelId;
       const selDevice = document.getElementById("selDevice");
       const btnRefresh = document.getElementById("btnRefresh");
 
@@ -127,7 +128,10 @@
         btnStart.disabled = true;
         btnStop.disabled = false;
         statusEl.textContent = "connecting...";
-        sessionId = "S" + Math.random().toString(16).slice(2, 8);
+        // 공유 방 사용 - 모든 브라우저가 같은 session에 참여
+        sessionId = "SHARED_MEETING_ROOM";
+        // 사용자별 구분을 위한 고유 채널ID
+        channelId = "User_" + Math.random().toString(16).slice(2, 8);
 
         pc = new RTCPeerConnection();
         pc.oniceconnectionstatechange = () =>
@@ -193,6 +197,8 @@
         console.log("🔌 WebSocket URL:", wsUrl);
         console.log("📍 Current protocol:", location.protocol);
         console.log("🏠 Current host:", location.host);
+        console.log("👤 User Channel:", channelId);
+        console.log("🏢 Meeting Room:", sessionId);
         ws = new WebSocket(wsUrl);
         ws.onopen = () => console.log("ws open");
         ws.onclose = (e) => console.log("ws close", e.code, e.reason);
@@ -200,10 +206,15 @@
         ws.onmessage = (e) => {
           try {
             const msg = JSON.parse(e.data);
+            console.log("📨 Received message:", msg); // 디버깅용
             if (msg.type === "final") {
+              const speaker = msg.speaker || "Unknown";
+              console.log("👤 Speaker info:", speaker); // 디버깅용
               (msg.segments || []).forEach((seg) =>
                 log(
-                  `${formatTs(seg.start)} - ${formatTs(seg.end)}  ${seg.text}`,
+                  `[${speaker}] ${formatTs(seg.start)} - ${formatTs(
+                    seg.end
+                  )}  ${seg.text}`,
                   "final"
                 )
               );
@@ -243,7 +254,7 @@
               sdp: finalOffer.sdp,
               type: finalOffer.type,
               session_id: sessionId,
-              channel_id: "C01",
+              channel_id: channelId,
             }),
           }
         );
