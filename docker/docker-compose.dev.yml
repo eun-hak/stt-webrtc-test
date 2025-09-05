@@ -1,0 +1,13 @@
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: docker/api.Dockerfile
+    environment:
+      STT_ENDPOINT: "http://host.docker.internal:8081"
+      GLOSSARY_PATH: "/app/config/glossary.yaml"
+    volumes:
+      - ../config:/app/config:ro
+      - ../storage:/app/storage
+    ports:
+      - "8080:8080"

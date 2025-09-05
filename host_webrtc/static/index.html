@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Cache-Control"
+      content="no-cache, no-store, must-revalidate"
+    />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>WebRTC STT Demo (Host Server)</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 20px;
+      }
+      #log {
+        white-space: pre-wrap;
+        background: #f6f6f6;
+        padding: 8px;
+        border-radius: 6px;
+        height: 220px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .partial {
+        color: #666;
+        font-style: italic;
+      }
+      .final {
+        color: #111;
+      }
+      footer {
+        margin-top: 12px;
+        color: #666;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ChatBrain STT (WebRTC Demo - Host Server 8082)</h1>
+    <div>
+      <button id="btnStart">마이크 시작</button>
+      <button id="btnStop" disabled>정지</button>
+      <select id="selDevice"></select>
+      <button id="btnRefresh">장치 새로고침</button>
+    </div>
+    <div id="status">idle</div>
+    <h3>Transcript</h3>
+    <div id="log"></div>
+    <footer>2025 © SimSimi Inc. - Host WebRTC Server (Port 8082)</footer>
+
+    <script>
+      const btnStart = document.getElementById("btnStart");
+      const btnStop = document.getElementById("btnStop");
+      const statusEl = document.getElementById("status");
+      const logEl = document.getElementById("log");
+
+      let pc;
+      let ws;
+      let sessionId;
+      const selDevice = document.getElementById("selDevice");
+      const btnRefresh = document.getElementById("btnRefresh");
+
+      async function refreshDevices() {
+        // 미디어 API 지원 확인
+        if (
+          !navigator.mediaDevices ||
+          !navigator.mediaDevices.enumerateDevices
+        ) {
+          console.error(
+            "Media Devices API not supported or not available in this context"
+          );
+          log(
+            "❌ 미디어 API를 사용할 수 없습니다. HTTPS 또는 localhost가 필요합니다.",
+            "final"
+          );
+          return;
+        }
+
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const inputs = devices.filter((d) => d.kind === "audioinput");
+        selDevice.innerHTML = "";
+        for (const d of inputs) {
+          const opt = document.createElement("option");
+          opt.value = d.deviceId;
+          opt.textContent = d.label || `input-${selDevice.length + 1}`;
+          selDevice.appendChild(opt);
+        }
+        console.log(
+          "audio inputs:",
+          inputs.map((d) => ({ label: d.label, id: d.deviceId }))
+        );
+      }
+
+      function log(line, cls = "final") {
+        const div = document.createElement("div");
+        div.className = cls;
+        div.textContent = line;
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function pad2(n) {
+        return n.toString().padStart(2, "0");
+      }
+      function pad3(n) {
+        return n.toString().padStart(3, "0");
+      }
+      function formatTs(sec) {
+        const s = Math.max(0, Number(sec) || 0);
+        const hours = Math.floor(s / 3600);
+        const minutes = Math.floor((s % 3600) / 60);
+        const seconds = Math.floor(s % 60);
+        const millis = Math.round((s - Math.floor(s)) * 1000);
+        if (hours > 0) {
+          return `${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}.${pad3(
+            millis
+          )}`;
+        } else {
+          return `${pad2(minutes)}:${pad2(seconds)}.${pad3(millis)}`;
+        }
+      }
+
+      async function start() {
+        btnStart.disabled = true;
+        btnStop.disabled = false;
+        statusEl.textContent = "connecting...";
+        sessionId = "S" + Math.random().toString(16).slice(2, 8);
+
+        pc = new RTCPeerConnection();
+        pc.oniceconnectionstatechange = () =>
+          console.log("iceConnectionState", pc.iceConnectionState);
+        pc.onconnectionstatechange = () =>
+          console.log("connectionState", pc.connectionState);
+        pc.onicegatheringstatechange = () =>
+          console.log("iceGatheringState", pc.iceGatheringState);
+
+        const selId = selDevice.value || undefined;
+        const audioConstraints = selId
+          ? {
+              deviceId: { exact: selId },
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            }
+          : {
+              channelCount: 1,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            };
+        // 미디어 API 지원 확인
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          console.error(
+            "getUserMedia not supported or not available in this context"
+          );
+          log(
+            "❌ 마이크 접근이 불가능합니다. HTTPS 또는 localhost가 필요합니다.",
+            "final"
+          );
+          btnStart.disabled = false;
+          btnStop.disabled = true;
+          statusEl.textContent = "failed";
+          return;
+        }
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: audioConstraints,
+        });
+        const tracks = stream.getAudioTracks();
+        console.log(
+          "tracks",
+          tracks.map((t) => ({
+            label: t.label,
+            muted: t.muted,
+            enabled: t.enabled,
+            ready: t.readyState,
+          }))
+        );
+        for (const track of tracks) {
+          track.onmute = () => console.log("track mute");
+          track.onunmute = () => console.log("track unmute");
+          pc.addTrack(track, stream);
+        }
+
+        // WebSocket for transcript - HTTPS에서는 wss:// 사용
+        const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const wsHost = location.host; // 포트 포함된 호스트 사용
+        const wsUrl = `${wsProtocol}//${wsHost}/ws/transcript?session=${sessionId}`;
+        console.log("🔌 WebSocket URL:", wsUrl);
+        console.log("📍 Current protocol:", location.protocol);
+        console.log("🏠 Current host:", location.host);
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => console.log("ws open");
+        ws.onclose = (e) => console.log("ws close", e.code, e.reason);
+        ws.onerror = (e) => console.log("ws error", e);
+        ws.onmessage = (e) => {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === "final") {
+              (msg.segments || []).forEach((seg) =>
+                log(
+                  `${formatTs(seg.start)} - ${formatTs(seg.end)}  ${seg.text}`,
+                  "final"
+                )
+              );
+            } else if (msg.type === "partial") {
+              log(`[partial] ${msg.text}`, "partial");
+            } else if (msg.type === "info") {
+              statusEl.textContent = msg.message;
+              console.log("info", msg.message);
+            }
+          } catch {}
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        // Wait for ICE gathering to complete (non-trickle)
+        await new Promise((resolve) => {
+          if (pc.iceGatheringState === "complete") return resolve();
+          const check = () => {
+            if (pc.iceGatheringState === "complete") {
+              pc.removeEventListener("icegatheringstatechange", check);
+              resolve();
+            }
+          };
+          pc.addEventListener("icegatheringstatechange", check);
+        });
+        const finalOffer = pc.localDescription;
+        console.log("sending offer with ICE");
+        // WebRTC offer를 같은 서버로 전송 - HTTPS에서는 https:// 사용
+        const httpProtocol =
+          location.protocol === "https:" ? "https:" : "http:";
+        const res = await fetch(
+          `${httpProtocol}//${location.host}/webrtc/offer`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sdp: finalOffer.sdp,
+              type: finalOffer.type,
+              session_id: sessionId,
+              channel_id: "C01",
+            }),
+          }
+        );
+        const answer = await res.json();
+        await pc.setRemoteDescription(answer);
+        statusEl.textContent = "streaming";
+      }
+
+      async function stop() {
+        btnStart.disabled = false;
+        btnStop.disabled = true;
+        statusEl.textContent = "stopped";
+        if (ws) {
+          try {
+            ws.close();
+          } catch {}
+          ws = null;
+        }
+        if (pc) {
+          pc.getSenders().forEach((s) => {
+            try {
+              s.track && s.track.stop();
+            } catch {}
+          });
+          pc.close();
+          pc = null;
+        }
+      }
+
+      btnStart.onclick = start;
+      btnStop.onclick = stop;
+      btnRefresh.onclick = refreshDevices;
+
+      // 보안 컨텍스트 확인
+      function checkSecurityContext() {
+        const isSecure = window.isSecureContext;
+        const protocol = window.location.protocol;
+        const hostname = window.location.hostname;
+
+        console.log("Security Context:", {
+          isSecure,
+          protocol,
+          hostname,
+          mediaDevices: !!navigator.mediaDevices,
+        });
+
+        if (!isSecure) {
+          log(
+            "⚠️ 비보안 컨텍스트입니다. HTTPS 또는 localhost 사용을 권장합니다.",
+            "final"
+          );
+        }
+
+        if (!navigator.mediaDevices) {
+          log("❌ 이 브라우저에서는 미디어 API를 사용할 수 없습니다.", "final");
+        }
+      }
+
+      checkSecurityContext();
+      refreshDevices();
+    </script>
+  </body>
+</html>
